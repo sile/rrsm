@@ -1,0 +1,14 @@
+[package]
+name = "rrsm"
+version = "0.1.0"
+authors = ["Takeru Ohta <phjgt308@gmail.com>"]
+description = "Raft based Replicated State Machine"
+documentation = "http://sile.github.io/rustdocs/rrsm/rrsm/"
+homepage = "https://github.com/sile/rrsm"
+repository = "https://github.com/sile/rrsm"
+readme = "README.md"
+keywords = ["raft", "distributed", "consensus"]
+license = "MIT"
+
+[dependencies]
+eventual = "*"
