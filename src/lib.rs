@@ -5,6 +5,8 @@ use std::collections::HashSet;
 use eventual::Future;
 use eventual::Async;
 
+pub mod raft;
+
 pub type NodeId = String;
 pub type Term = u64;
 pub type Index = u64;
