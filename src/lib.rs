@@ -6,6 +6,7 @@ use eventual::Future;
 use eventual::Async;
 
 pub mod raft;
+pub mod raft_protocol;
 
 pub type NodeId = String;
 pub type Term = u64;
@@ -26,6 +27,7 @@ pub trait StateMachine {
     // fn snapshot();
 }
 
+#[allow(dead_code)]
 enum RoleState {
     Follower,
     Candidate {
@@ -64,6 +66,7 @@ pub enum HandleError {
     Todo,
 }
 
+#[allow(dead_code)]
 // TODO: Support snapshots
 // TODO: Support member change
 pub struct Rsm<S, L, T> {
@@ -136,7 +139,7 @@ impl<S, L, T> Rsm<S, L, T>
             })
             .or_else(|_| Err(HandleError::Todo))
     }
-    pub fn handle_message(mut self, message: Message<S::Command>) -> Future<Self, HandleError> {
+    pub fn handle_message(self, message: Message<S::Command>) -> Future<Self, HandleError> {
         match message {
             Message::AppendEntriesCall { source, entries, leader_commit } => {
                 self.handle_append_entries(source, entries, leader_commit)
@@ -168,7 +171,7 @@ impl<S, L, T> Rsm<S, L, T>
     fn handle_append_entries(mut self,
                              source: Source,
                              entries: Vec<(Term, S::Command)>,
-                             leader_commit: Index)
+                             _leader_commit: Index)
                              -> Future<Self, HandleError> {
         if entries.is_empty() {
             let message = self.make_reply(true);
@@ -205,7 +208,7 @@ impl<S, L, T> Rsm<S, L, T>
         // TODO: Compare log indices
         return true;
     }
-    fn handle_reply(mut self, source: Source, success: bool) -> Future<Self, HandleError> {
+    fn handle_reply(mut self, _source: Source, success: bool) -> Future<Self, HandleError> {
         // TODO: リクエストとの対応が取れるようにする
         match self.role_state {
             RoleState::Leader { .. } => {
