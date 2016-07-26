@@ -11,4 +11,3 @@ keywords = ["raft", "distributed", "consensus"]
 license = "MIT"
 
 [dependencies]
-eventual = "*"

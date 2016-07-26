@@ -4,6 +4,7 @@ use std::ops::Range;
 use StateMachine;
 use raft_protocol;
 use raft_protocol::LogEntry;
+use raft_protocol::Message;
 use LogIndex;
 use Term;
 use NodeId;
@@ -12,6 +13,7 @@ pub trait Storage<T> {
     type Error;
     fn log_append(&mut self, entries: Vec<LogEntry<T>>) -> Result<(), Self::Error>;
     fn log_truncate(&mut self, range: Range<LogIndex>) -> Result<(), Self::Error>;
+    fn log_get(&mut self, range: Range<LogIndex>) -> Result<Vec<LogEntry<T>>, Self::Error>;
     fn data_write(&mut self, key: &str, offset: u64, data: &[u8]) -> Result<(), Self::Error>;
     fn data_read(&mut self,
                  key: &str,
@@ -43,91 +45,58 @@ pub trait Rpc<T> {
     type From;
     fn call(&mut self,
             destination: &NodeId,
-            message: T,
-            reply_channel: std::sync::mpsc::Sender<T>)
+            message: Message<T>,
+            reply_channel: std::sync::mpsc::Sender<Message<T>>)
             -> Result<(), Self::Error>;
-    fn reply(&mut self, from: &Self::From, message: T) -> Result<(), Self::Error>;
+    fn reply(&mut self, from: &Self::From, message: Message<T>) -> Result<(), Self::Error>;
 }
 
-pub enum Error2 {
-    Storage,
-    Rpc,
-    Consensus,
+pub enum Error<S, R> {
+    Storage(S),
+    Rpc(R),
+    Consensus(raft_protocol::Error),
 }
-
-pub trait LogStorage<T> {
-    type Error;
-    fn append(&mut self, entries: Vec<LogEntry<T>>) -> Result<(), Self::Error>;
-    fn truncate(&mut self, last_index: LogIndex) -> Result<(), Self::Error>;
-    fn drop(&mut self, first_index: LogIndex) -> Result<(), Self::Error>;
-}
-pub trait StateStorage {}
-pub trait Transport {}
-
-pub trait IoSystem<T> {
-    type LogStorage: LogStorage<T>;
-    type StateStorage: StateStorage;
-    type Transport: Transport;
-
-    fn get_log_storage_mut(&mut self) -> &mut Self::LogStorage;
-    fn get_state_storage_mut(&mut self) -> &mut Self::StateStorage;
-    fn get_transport_mut(&mut self) -> &mut Self::Transport;
-}
-
-pub enum Error<IO, T>
-    where IO: IoSystem<T>
-{
-    LogStorage(<IO::LogStorage as LogStorage<T>>::Error),
-    Protocol(raft_protocol::Error),
-}
-impl<IO, T> Error<IO, T>
-    where IO: IoSystem<T>
-{
-    pub fn from_log_storage_err(e: <IO::LogStorage as LogStorage<T>>::Error) -> Self {
-        Error::LogStorage(e)
+impl<S, R> Error<S, R> {
+    pub fn from_storage_error(e: S) -> Self {
+        Error::Storage(e)
     }
 }
 
-pub struct SyncRsm<S, IO>
-    where S: StateMachine
+pub struct SyncRsm<M, S, R>
+    where M: StateMachine
 {
-    state_machine: S,
+    state_machine: M,
+    storage: S,
+    rpc: R,
     consensus: Option<raft_protocol::ConsensusModule>,
-    action_queue: VecDeque<raft_protocol::Action<S::Command>>,
-    io_system: IO,
+    action_queue: VecDeque<raft_protocol::Action<M::Command>>,
 }
-impl<S, IO> SyncRsm<S, IO>
-    where S: StateMachine,
-          IO: IoSystem<S::Command>
+impl<M, S, R> SyncRsm<M, S, R>
+    where M: StateMachine,
+          S: Storage<M::Command>,
+          R: Rpc<M::Command>
 {
-    pub fn new(state_machine: S, io_system: IO) -> Self {
+    pub fn new(state_machine: M, storage: S, rpc: R) -> Self {
         let conf = unsafe { std::mem::zeroed() };
         let table = unsafe { std::mem::zeroed() };
         let (consensus, actions) =
             raft_protocol::ConsensusModule::new("todo".to_string(), 0, None, conf, table);
         SyncRsm {
             state_machine: state_machine,
+            storage: storage,
+            rpc: rpc,
             consensus: Some(consensus),
             action_queue: actions.into_iter().collect(),
-            io_system: io_system,
         }
     }
-    pub fn run_once(&mut self) -> Result<bool, Error<IO, S::Command>> {
+    pub fn run_once(&mut self) -> Result<bool, Error<S::Error, R::Error>> {
         if let Some(action) = self.action_queue.pop_front() {
             use raft_protocol::Action;
             match action {
                 Action::LogAppend(entries) => {
-                    try!(self.io_system
-                        .get_log_storage_mut()
-                        .append(entries)
-                        .map_err(Error::from_log_storage_err))
+                    try!(self.storage.log_append(entries).map_err(Error::from_storage_error))
                 }
-                Action::LogTruncate(index) => {
-                    try!(self.io_system
-                        .get_log_storage_mut()
-                        .truncate(index)
-                        .map_err(Error::from_log_storage_err))
-                }
+                Action::LogTruncate(_) => panic!(),
                 Action::LogCommit(_) => panic!(),
                 Action::SaveState(_, _) => panic!(),
                 Action::InstallSnapshot(_, _, _, _, _, _) => panic!(),
