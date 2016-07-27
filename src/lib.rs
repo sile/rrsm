@@ -65,11 +65,11 @@ pub enum NodeRole {
     Leader,
 }
 
-pub struct ReplicatedStateMachine<M> {
+pub struct State<M> {
     context: Context,
     machine: M,
 }
-impl<M> ReplicatedStateMachine<M>
+impl<M> State<M>
     where M: Machine
 {
     pub fn execute(&mut self, command: CommitedCommand<M::Command>) -> bool {
@@ -104,7 +104,7 @@ pub trait ReplicatedLog<M>
     where M: Machine
 {
     type Error;
-    fn create_machine(&mut self) -> Result<ReplicatedStateMachine<M>, Self::Error>;
+    fn create_state_machine(&mut self) -> Result<State<M>, Self::Error>;
     fn run_once(&mut self) -> Result<Option<Event<M>>, Self::Error>;
 
     fn commit(&mut self, command: M::Command, expected: Option<CommitVersion>) -> Token;
