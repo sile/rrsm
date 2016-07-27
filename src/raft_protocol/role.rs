@@ -23,6 +23,24 @@ pub struct LogIndexTable {
     table: Vec<(LogIndex, Term)>,
 }
 impl LogIndexTable {
+    pub fn new() -> Self {
+        LogIndexTable{
+            last_log_index: 0,
+            table: vec![(0,0)]
+        }
+    }
+    pub fn new2(index: LogIndex, term: Term) -> Self{
+        LogIndexTable{
+            last_log_index: index,
+            table: vec![(index, term)]
+        }
+    }
+    pub fn snapshot_term(&self) -> Term {
+        panic!()
+    }
+    pub fn snapshot_log_index(&self) -> LogIndex{
+        panic!()
+    }
     pub fn last_log_index(&self) -> LogIndex {
         self.last_log_index
     }

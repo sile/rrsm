@@ -3,12 +3,21 @@ use std::collections::HashSet;
 
 pub mod role;
 use self::role::ConsensusRole;
+pub use self::role::LogIndexTable;
 
 pub type NodeId = String;
 pub type Term = u64;
 pub type LogIndex = u64;
 
-pub type Error = ();
+pub enum Error {
+    NotLeader(Option<NodeId>),
+    Panic,
+}
+impl<'a> From<Option<&'a NodeId>> for Error {
+    fn from(x: Option<&'a NodeId>) -> Self {
+        Error::NotLeader(x.cloned())
+    }
+}
 
 pub enum ConsensusModule {
     Follower(role::FollowerRole),
@@ -33,23 +42,19 @@ impl ConsensusModule {
         let actions = follower.init();
         (ConsensusModule::Follower(follower), actions)
     }
-    pub fn handle_command<T>(&mut self,
-                             command: T)
-                             -> Result<(LogIndex, Actions<T>), Option<&NodeId>> {
-        match *self {
-            ConsensusModule::Follower(ref mut x) => x.handle_command(command),
-            ConsensusModule::Candidate(ref mut x) => x.handle_command(command),
-            ConsensusModule::Leader(ref mut x) => x.handle_command(command),
-        }
+    pub fn handle_command<T>(&mut self, command: T) -> Result<(LogIndex, Actions<T>), Error> {
+        Ok(match *self {
+            ConsensusModule::Follower(ref mut x) => try!(x.handle_command(command)),
+            ConsensusModule::Candidate(ref mut x) => try!(x.handle_command(command)),
+            ConsensusModule::Leader(ref mut x) => try!(x.handle_command(command)),
+        })
     }
-    pub fn handle_change_config<T>(&mut self,
-                                   new_config: Config)
-                                   -> Result<Actions<T>, Option<&NodeId>> {
-        match *self {
-            ConsensusModule::Follower(ref mut x) => x.handle_change_config(new_config),
-            ConsensusModule::Candidate(ref mut x) => x.handle_change_config(new_config),
-            ConsensusModule::Leader(ref mut x) => x.handle_change_config(new_config),
-        }
+    pub fn handle_change_config<T>(&mut self, new_config: Config) -> Result<Actions<T>, Error> {
+        Ok(match *self {
+            ConsensusModule::Follower(ref mut x) => try!(x.handle_change_config(new_config)),
+            ConsensusModule::Candidate(ref mut x) => try!(x.handle_change_config(new_config)),
+            ConsensusModule::Leader(ref mut x) => try!(x.handle_change_config(new_config)),
+        })
     }
     pub fn handle_message<T>(&mut self, sender: Sender, message: Message<T>) -> Actions<T> {
         match *self {
@@ -184,7 +189,10 @@ impl<T> LogEntry<T> {
 
 pub enum LogData<T> {
     Config(ConfigState),
+
+    // TODO: add Elected(Config),
     Noop,
+
     Command(T),
 }
 
