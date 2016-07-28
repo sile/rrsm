@@ -5,6 +5,8 @@ use std::time::Duration;
 pub mod raft_protocol;
 pub mod sync;
 
+pub mod tmp;
+
 pub use self::raft_protocol::{NodeId, Term, LogIndex, LogEntry};
 
 pub trait Machine: Default {

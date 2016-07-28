@@ -1,3 +1,4 @@
+#![allow(dead_code,unused_variables)]
 use std::time::Duration;
 use std::ops::Range;
 use std::result::Result as StdResult;
@@ -255,7 +256,7 @@ impl<M, S, R> Replicator<M, S, R>
                      a: raft::Action<M::Command>)
                      -> Result<Vec<Event>, S::Error, R::Error> {
         use raft_protocol::Action;
-        let mut events = Vec::new();
+        let events = Vec::new();
         match a {
             Action::LogAppend(entries) => {
                 storage_try!(self.storage.log_append(entries));
