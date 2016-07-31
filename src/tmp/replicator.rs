@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use super::*;
 
 pub struct Message<T>(pub T);
@@ -24,11 +26,17 @@ impl ConsensusModule {
                -> Self {
         panic!()
     }
+    pub fn config(&self) -> &config::Config {
+        panic!()
+    }
 }
 
 use std::collections::VecDeque;
 
-pub struct Replicator<M, S, R> {
+pub struct Replicator<M, S, R>
+    where M: Machine,
+          R: io::Rpc<Message<M::Command>>
+{
     id: NodeId,
     machine: M,
     state_version: Version,
@@ -39,8 +47,10 @@ pub struct Replicator<M, S, R> {
     token_gen: TokenGenerator,
     timer: Timer,
     event_queue: VecDeque<Event>,
-    action_queue: VecDeque<Action>,
-    request_queue: VecDeque<Request>,
+    action_queue: VecDeque<Action<M>>,
+    shutdown: bool,
+    token_to_action: HashMap<Token, Action<M>>,
+    index_to_token: HashMap<LogIndex, Token>,
 }
 impl<M, S, R> Replicator<M, S, R>
     where M: Machine,
@@ -97,29 +107,50 @@ impl<M, S, R> Replicator<M, S, R>
         Ok(Some(this))
     }
     pub fn run_once(&mut self) -> Result<Option<Event>, S::Error> {
-        panic!()
+        self.check_timer();
+        self.check_mailbox();
+        try!(self.storage_run_once());
+        if let Some(action) = self.action_queue.pop_front() {
+            try!(self.handle_action(action));
+        }
+        Ok(self.event_queue.pop_front())
     }
     pub fn sync(&mut self) -> Token {
-        panic!()
+        let token = self.token_gen.next();
+        self.action_queue.push_back(Action::Sync(token.clone()));
+        token
     }
-    pub fn propose(&mut self, proposal: M::Command, precondition: Option<Version>) -> Token {
-        panic!()
+    pub fn propose(&mut self, proposal: M::Command) -> Token {
+        let token = self.token_gen.next();
+        self.action_queue
+            .push_back(Action::ExecuteCommand(token.clone(), proposal));
+        token
     }
     pub fn update_config(&mut self, config: config::Builder) -> Token {
-        panic!()
+        let token = self.token_gen.next();
+        self.action_queue.push_back(Action::UpdateConfig(token.clone(), config.build()));
+        token
     }
     pub fn take_snapshot(&mut self) -> Token {
-        panic!()
+        // NOTE: high priority
+        let token = self.token_gen.next();
+        let metadata = io::SnapshotMetadata::new(self.state_version(),
+                                                 self.consensus.as_ref().unwrap().config());
+        let snapshot = self.machine.take_snapshot();
+        self.action_queue.push_front(Action::InstallSnapshot(token.clone(),
+                                                             IsFsm::SnapshotSave(metadata,
+                                                                                 snapshot)));
+        token
     }
-    pub fn cancel(&mut self) -> bool {
-        panic!()
+    pub fn shutdown(mut self) -> Result<(), S::Error> {
+        self.shutdown = true;
+        while self.queue_len() > 0 {
+            try!(self.run_once());
+        }
+        Ok(())
     }
-    pub fn shutdown(self) -> Result<(), S::Error> {
-        // don't receive new messages
-        panic!()
-    }
-    pub fn queue_length(&self) -> usize {
-        self.event_queue.len() + self.action_queue.len() + self.request_queue.len()
+    pub fn queue_len(&self) -> usize {
+        self.event_queue.len() + self.action_queue.len()
     }
     pub fn node_id(&self) -> &NodeId {
         &self.id
@@ -144,17 +175,100 @@ impl<M, S, R> Replicator<M, S, R>
             timer: Timer::new(),
             event_queue: VecDeque::new(),
             action_queue: VecDeque::new(),
-            request_queue: VecDeque::new(),
+            shutdown: false,
+            token_to_action: HashMap::new(),
+            index_to_token: HashMap::new(),
         }
+    }
+    fn check_timer(&mut self) {
+        if self.timer.is_elapsed() {
+            self.timer.clear();
+            // NOTE: timeouts are interaption event (i.e., higher priority)
+            self.action_queue.push_front(Action::Timeout);
+        }
+    }
+    fn check_mailbox(&mut self) {
+        if self.shutdown {
+            return;
+        }
+        if let Some(recv) = self.rpc.try_recv() {
+            self.action_queue.push_back(Action::Recv(recv));
+        }
+    }
+    fn storage_run_once(&mut self) -> Result<(), S::Error> {
+        if let Some((token, result)) = self.storage.run_once(true) {
+            let data = try!(result.map_err(Error::Storage));
+            self.action_queue.push_back(Action::Storage(token, data));
+        }
+        Ok(())
+    }
+    fn consensus_mut(&mut self) -> &mut ConsensusModule {
+        self.consensus.as_mut().unwrap()
+    }
+    fn consensus(&self) -> &ConsensusModule {
+        self.consensus.as_ref().unwrap()
+    }
+    // TODO: handle_reaction
+    fn handle_action(&mut self, action: Action<M>) -> Result<(), S::Error> {
+        let actions = match action {
+            Action::Timeout => try!(self.consensus_mut().handle_timeout()),
+            Action::Recv(message) => try!(self.consensus_mut().handle_message(message)),
+            Action::Storage(token, data) => {
+                // state-handling
+                panic!()
+            }
+            Action::InstallSnapshot(token, IsFsm::SnapshotSave(metadata, snapshot)) => {
+                //
+            }
+            Action::InstallSnapshot(token, IsFsm::LogDrop(index)) => {
+                //
+            }
+            Action::InstallSnapshot(token, IsFsm::UpdateConsensus(index)) => {
+                //
+            }
+            Action::Sync(token) => {
+                // 1. 現在の論理時刻を取得
+                //    - 論理時刻: leaderになってからのメッセージ送信数?
+                // 2. それを載せてRPCを実行
+                // 3. replyを監
+                // 4. consensusがreplyを処理後に、
+                //    leaderだと過半数に認められた最小時刻を取得
+                // 5. それが1より大きくなったらクライアントに応答を返す
+            }
+            Action::UpdateConfig(token, config) => {
+                //
+            }
+            Action::ExecuteCommand(token, command) => {
+                //
+            }
+        };
+        self.action_queue.extend(actions);
+        Ok(())
     }
 }
 
-pub struct Action;
-pub struct Request;
+pub enum IsFsm<M, S> {
+    SnapshotSave(M, S),
+    LogDrop(LogIndex),
+    UpdateConsensus(LogIndex),
+}
+
+pub enum Action<M>
+    where M: Machine
+{
+    Timeout,
+    Recv(Message<M::Command>),
+    Storage(Token, io::StorageData<M>),
+    InstallSnapshot(Token, IsFsm<io::SnapshotMetadata, M::Snapshot>),
+    Sync(Token),
+    UpdateConfig(Token, config::Config),
+    ExecuteCommand(Token, M::Command),
+}
 
 pub enum Event {
     Done(Token),
     Aborted(Token),
+    NotLeader(Option<NodeId>),
     ConfigChanged(config::Config),
     RoleChanged(NodeRole),
 }
@@ -177,5 +291,11 @@ pub struct Timer;
 impl Timer {
     pub fn new() -> Self {
         Timer
+    }
+    pub fn is_elapsed(&self) -> bool {
+        panic!()
+    }
+    pub fn clear(&mut self) {
+        panic!()
     }
 }

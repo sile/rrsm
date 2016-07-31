@@ -1,21 +1,9 @@
 use super::*;
 
-pub trait Rpc<C, R = C> {
-    type From;
-    fn call(&mut self, destination: &NodeId, message: &C, token: Token);
-    fn reply(&mut self, from: Self::From, message: &R);
-    fn try_recv(&mut self) -> Option<RecvData<Self::From, C, R>>;
-}
-
-pub enum RecvData<F, C, R> {
-    Call {
-        from: F,
-        message: C,
-    },
-    Reply {
-        token: Token,
-        message: R,
-    },
+// TODO: Transport(?)
+pub trait Rpc<T> {
+    fn send(&mut self, destination: &NodeId, message: &T);
+    fn try_recv(&mut self) -> Option<T>;
 }
 
 pub struct LogEntry<T> {
@@ -27,6 +15,18 @@ impl<T> LogEntry<T> {
         LogEntry {
             term: term,
             data: LogData::Noop,
+        }
+    }
+    pub fn command(term: Term, command: T) -> Self {
+        LogEntry {
+            term: term,
+            data: LogData::Command(command),
+        }
+    }
+    pub fn config(term: Term, config: Config) -> Self {
+        LogEntry {
+            term: term,
+            data: LogData::Config(config),
         }
     }
 }
@@ -56,7 +56,7 @@ pub trait Storage<M>
     where M: Machine
 {
     type Error;
-    fn log_append(&mut self, &[LogEntry<M::Command>], token: Token);
+    fn log_append(&mut self, &[LogEntry<M::Command>], token: Token) -> LogIndex;
     fn log_truncate(&mut self, end_index: LogIndex, token: Token);
     fn log_drop_until(&mut self, first_index: LogIndex, token: Token);
     fn log_get(&mut self, offset: LogIndex, max_length: usize, token: Token);
