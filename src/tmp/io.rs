@@ -52,22 +52,23 @@ impl SnapshotMetadata {
     }
 }
 
+// Requests are handled by the FIFO manner
 pub trait Storage<M>
     where M: Machine
 {
     type Error;
-    fn log_append(&mut self, &[LogEntry<M::Command>], token: Token) -> LogIndex;
-    fn log_truncate(&mut self, end_index: LogIndex, token: Token);
-    fn log_drop_until(&mut self, first_index: LogIndex, token: Token);
-    fn log_get(&mut self, offset: LogIndex, max_length: usize, token: Token);
+    fn log_append(&mut self, &[LogEntry<M::Command>]) -> LogIndex;
+    fn log_truncate(&mut self, end_index: LogIndex);
+    fn log_drop_until(&mut self, first_index: LogIndex);
+    fn log_get(&mut self, offset: LogIndex, max_length: usize);
     fn build_log_table(&self) -> LogIndexTable;
 
-    fn save_ballot(&mut self, ballot: &Ballot, token: Token);
-    fn load_ballot(&mut self, token: Token);
-    fn save_snapshot(&mut self, metadata: SnapshotMetadata, snapshot: M::Snapshot, token: Token);
-    fn load_snapshot(&mut self, token: Token);
+    fn save_ballot(&mut self, ballot: &Ballot);
+    fn load_ballot(&mut self);
+    fn save_snapshot(&mut self, metadata: SnapshotMetadata, snapshot: M::Snapshot);
+    fn load_snapshot(&mut self);
 
-    fn run_once(&mut self, async: bool) -> Option<(Token, Result<StorageData<M>, Self::Error>)>;
+    fn run_once(&mut self, async: bool) -> Option<Result<StorageData<M>, Self::Error>>;
 
     fn queue_len(&self) -> usize;
     fn flush(&mut self) -> Result<(), Self::Error>;
@@ -76,7 +77,7 @@ pub trait Storage<M>
 pub enum StorageData<M>
     where M: Machine
 {
-    LogEntries(LogEntry<M::Command>),
+    LogEntries(Vec<LogEntry<M::Command>>),
     Ballot(Ballot),
     Snapshot {
         metadata: SnapshotMetadata,

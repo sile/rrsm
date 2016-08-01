@@ -59,6 +59,3 @@ impl Ballot {
         }
     }
 }
-
-#[derive(Clone,Eq,PartialEq,Hash)]
-pub struct Token(u64);

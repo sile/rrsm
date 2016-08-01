@@ -1,13 +1,23 @@
-use std::collections::HashMap;
-
+#![allow(unused_variables)]
 use super::*;
 
-pub struct Message<T>(pub T);
+pub struct MessageHeader {
+    // TODO: clock or timestamp or seq
+    pub from: NodeId,
+    pub node_instance_id: usize,
+    pub version: Version,
+}
+
+pub struct Message<T> {
+    pub header: MessageHeader,
+    pub data: T,
+}
 
 pub enum Error<S> {
     NotMember,
     Storage(S),
     Consensus(raft::Error),
+    CommitConfliction,
 }
 impl<S> From<raft::Error> for Error<S> {
     fn from(e: raft::Error) -> Self {
@@ -29,6 +39,39 @@ impl ConsensusModule {
     pub fn config(&self) -> &config::Config {
         panic!()
     }
+    pub fn handle_timeout<T: Machine>(&mut self)
+                                      -> ::std::result::Result<Vec<Action<T>>, raft::Error> {
+        panic!()
+    }
+    pub fn handle_snapshot_installed<T: Machine>
+        (&mut self,
+         new_first_index: LogIndex)
+         -> ::std::result::Result<Vec<Action<T>>, raft::Error> {
+        panic!()
+    }
+    pub fn handle_sync<T: Machine>(&mut self)
+                                   -> ::std::result::Result<Vec<Action<T>>, raft::Error> {
+        panic!()
+    }
+    pub fn handle_message<T: Machine>(&mut self,
+                                      message: Message<T::Command>)
+                                      -> ::std::result::Result<Vec<Action<T>>, raft::Error> {
+        panic!()
+    }
+    pub fn handle_command<T: Machine>(&mut self,
+                                      command: T::Command)
+                                      -> ::std::result::Result<Vec<Action<T>>, raft::Error> {
+        panic!()
+    }
+    pub fn handle_update_config<T: Machine>
+        (&mut self,
+         config: config::Config)
+         -> ::std::result::Result<Vec<Action<T>>, raft::Error> {
+        panic!()
+    }
+    pub fn members(&self) -> Vec<&NodeId> {
+        panic!()
+    }
 }
 
 use std::collections::VecDeque;
@@ -44,13 +87,11 @@ pub struct Replicator<M, S, R>
     storage: S,
     rpc: R,
     consensus: Option<ConsensusModule>,
-    token_gen: TokenGenerator,
     timer: Timer,
     event_queue: VecDeque<Event>,
     action_queue: VecDeque<Action<M>>,
-    shutdown: bool,
-    token_to_action: HashMap<Token, Action<M>>,
-    index_to_token: HashMap<LogIndex, Token>,
+    io_wait: Option<Action<M>>,
+    syncs: VecDeque<u64>,
 }
 impl<M, S, R> Replicator<M, S, R>
     where M: Machine,
@@ -65,13 +106,13 @@ impl<M, S, R> Replicator<M, S, R>
 
         let mut this = Self::default(id, storage, rpc);
         let ballot = Ballot::new(0);
-        this.storage.log_truncate(0, this.token_gen.next());
-        this.storage.log_append(&[io::LogEntry::noop(ballot.term)], this.token_gen.next());
+        this.storage.log_truncate(0);
+        this.storage.log_append(&[io::LogEntry::noop(ballot.term)]);
 
         let snapshot = this.machine.take_snapshot();
         let metadata = io::SnapshotMetadata::new(&this.commit_version, &config);
-        this.storage.save_snapshot(metadata, snapshot, this.token_gen.next());
-        this.storage.save_ballot(&ballot, this.token_gen.next());
+        this.storage.save_snapshot(metadata, snapshot);
+        this.storage.save_ballot(&ballot);
         try!(this.storage.flush().map_err(Error::Storage));
 
         let log_index_table = this.storage.build_log_table();
@@ -82,22 +123,22 @@ impl<M, S, R> Replicator<M, S, R>
         let mut this = Self::default(id, storage, rpc);
 
         try!(this.storage.flush().map_err(Error::Storage));
-        this.storage.load_ballot(this.token_gen.next());
+        this.storage.load_ballot();
         let last_ballot =
-            match try!(this.storage.run_once(false).unwrap().1.map_err(Error::Storage)) {
+            match try!(this.storage.run_once(false).unwrap().map_err(Error::Storage)) {
                 io::StorageData::NotFound => return Ok(None),
                 io::StorageData::Ballot(ballot) => ballot,
                 _ => unreachable!(),
             };
 
-        this.storage.load_snapshot(this.token_gen.next());
+        this.storage.load_snapshot();
         let (metadata, snapshot) =
-            match try!(this.storage.run_once(false).unwrap().1.map_err(Error::Storage)) {
+            match try!(this.storage.run_once(false).unwrap().map_err(Error::Storage)) {
                 io::StorageData::NotFound => return Ok(None),
                 io::StorageData::Snapshot { metadata, snapshot } => (metadata, snapshot),
                 _ => unreachable!(),
             };
-        this.storage.log_drop_until(metadata.last.log_index + 1, this.token_gen.next());
+        this.storage.log_drop_until(metadata.last.log_index + 1);
         try!(this.storage.flush().map_err(Error::Storage));
 
         let log_index_table = this.storage.build_log_table();
@@ -115,39 +156,31 @@ impl<M, S, R> Replicator<M, S, R>
         }
         Ok(self.event_queue.pop_front())
     }
-    pub fn sync(&mut self) -> Token {
-        let token = self.token_gen.next();
-        self.action_queue.push_back(Action::Sync(token.clone()));
-        token
+    pub fn sync(&mut self) -> u64 {
+        let seq = 0; // XXX:
+        self.syncs.push_back(seq);
+        self.action_queue.push_back(Action::Sync(seq));
+        seq
     }
-    pub fn propose(&mut self, proposal: M::Command) -> Token {
-        let token = self.token_gen.next();
+    pub fn execute(&mut self, command: M::Command) -> LogIndex {
+        let reserved_index = 0; // TODO:
         self.action_queue
-            .push_back(Action::ExecuteCommand(token.clone(), proposal));
-        token
+            .push_back(Action::ExecuteCommand(command));
+        reserved_index
     }
-    pub fn update_config(&mut self, config: config::Builder) -> Token {
-        let token = self.token_gen.next();
-        self.action_queue.push_back(Action::UpdateConfig(token.clone(), config.build()));
-        token
+    pub fn update_config(&mut self, config: config::Builder) -> LogIndex {
+        let reserved_index = 0; // TODO:
+        self.action_queue.push_back(Action::UpdateConfig(config.build()));
+        reserved_index
     }
-    pub fn take_snapshot(&mut self) -> Token {
+    pub fn take_snapshot(&mut self) {
+        // TODO: duplication check
         // NOTE: high priority
-        let token = self.token_gen.next();
         let metadata = io::SnapshotMetadata::new(self.state_version(),
                                                  self.consensus.as_ref().unwrap().config());
         let snapshot = self.machine.take_snapshot();
-        self.action_queue.push_front(Action::InstallSnapshot(token.clone(),
-                                                             IsFsm::SnapshotSave(metadata,
-                                                                                 snapshot)));
-        token
-    }
-    pub fn shutdown(mut self) -> Result<(), S::Error> {
-        self.shutdown = true;
-        while self.queue_len() > 0 {
-            try!(self.run_once());
-        }
-        Ok(())
+        self.action_queue
+            .push_front(Action::InstallSnapshot(IsFsm::SnapshotSave(metadata, snapshot)));
     }
     pub fn queue_len(&self) -> usize {
         self.event_queue.len() + self.action_queue.len()
@@ -171,13 +204,11 @@ impl<M, S, R> Replicator<M, S, R>
             storage: storage,
             rpc: rpc,
             consensus: None,
-            token_gen: TokenGenerator::new(),
             timer: Timer::new(),
             event_queue: VecDeque::new(),
             action_queue: VecDeque::new(),
-            shutdown: false,
-            token_to_action: HashMap::new(),
-            index_to_token: HashMap::new(),
+            io_wait: None,
+            syncs: VecDeque::new(),
         }
     }
     fn check_timer(&mut self) {
@@ -188,17 +219,39 @@ impl<M, S, R> Replicator<M, S, R>
         }
     }
     fn check_mailbox(&mut self) {
-        if self.shutdown {
-            return;
-        }
         if let Some(recv) = self.rpc.try_recv() {
             self.action_queue.push_back(Action::Recv(recv));
         }
     }
     fn storage_run_once(&mut self) -> Result<(), S::Error> {
-        if let Some((token, result)) = self.storage.run_once(true) {
+        if self.io_wait.is_none() {
+            return Ok(());
+        }
+        if let Some(result) = self.storage.run_once(true) {
+            use super::io::StorageData;
             let data = try!(result.map_err(Error::Storage));
-            self.action_queue.push_back(Action::Storage(token, data));
+            match data {
+                StorageData::LogEntries(entries) => {
+                    let action = self.io_wait.take().unwrap();
+                    match action {
+                        Action::LogApply(_) => {
+                            self.action_queue.push_front(Action::LogApply(entries));
+                        }
+                        Action::AppendEntriesCall(dest, header, leader_commit) => {
+                            // TODO:
+                            panic!()
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                StorageData::Ballot(_ballot) => unreachable!(),
+                StorageData::Snapshot { metadata, snapshot } => panic!(),
+                StorageData::NotFound => panic!(),
+                StorageData::Done => {
+                    let action = self.io_wait.take().unwrap();
+                    self.action_queue.push_front(action);
+                }
+            }
         }
         Ok(())
     }
@@ -208,42 +261,124 @@ impl<M, S, R> Replicator<M, S, R>
     fn consensus(&self) -> &ConsensusModule {
         self.consensus.as_ref().unwrap()
     }
-    // TODO: handle_reaction
     fn handle_action(&mut self, action: Action<M>) -> Result<(), S::Error> {
+        if self.io_wait.is_some() {
+            return Ok(());
+        }
+
         let actions = match action {
+            Action::LogApply(entries) => {
+                for e in entries {
+                    let index = self.state_version.log_index + 1;
+                    self.state_version = Version::new(index, e.term);
+                    match e.data {
+                        io::LogData::Command(c) => {
+                            self.machine.execute(c);
+                        }
+                        _ => {}
+                    }
+                }
+                Vec::new()
+            }
+            Action::AppendEntriesCall(_, _, _) => unreachable!(),
             Action::Timeout => try!(self.consensus_mut().handle_timeout()),
             Action::Recv(message) => try!(self.consensus_mut().handle_message(message)),
-            Action::Storage(token, data) => {
-                // state-handling
-                panic!()
+            Action::InstallSnapshot(IsFsm::SnapshotSave(metadata, snapshot)) => {
+                let next_action = Action::InstallSnapshot(IsFsm::LogDrop(metadata.last.log_index +
+                                                                         1));
+                self.storage.save_snapshot(metadata, snapshot);
+                self.io_wait = Some(next_action);
+                Vec::new()
             }
-            Action::InstallSnapshot(token, IsFsm::SnapshotSave(metadata, snapshot)) => {
-                //
+            Action::InstallSnapshot(IsFsm::LogDrop(index)) => {
+                let next_action = Action::InstallSnapshot(IsFsm::UpdateConsensus(index));
+                self.storage.log_drop_until(index);
+                self.io_wait = Some(next_action);
+                Vec::new()
             }
-            Action::InstallSnapshot(token, IsFsm::LogDrop(index)) => {
-                //
+            Action::InstallSnapshot(IsFsm::UpdateConsensus(index)) => {
+                // TODO: LogDropと順序が逆な気がしてきた
+                // あとこの関数は非同期にする必要はなさそう
+                try!(self.consensus_mut().handle_snapshot_installed(index))
             }
-            Action::InstallSnapshot(token, IsFsm::UpdateConsensus(index)) => {
-                //
+            Action::Sync(seq) => {
+                // skip if already syned
+                try!(self.consensus_mut().handle_sync())
             }
-            Action::Sync(token) => {
-                // 1. 現在の論理時刻を取得
-                //    - 論理時刻: leaderになってからのメッセージ送信数?
-                // 2. それを載せてRPCを実行
-                // 3. replyを監
-                // 4. consensusがreplyを処理後に、
-                //    leaderだと過半数に認められた最小時刻を取得
-                // 5. それが1より大きくなったらクライアントに応答を返す
-            }
-            Action::UpdateConfig(token, config) => {
-                //
-            }
-            Action::ExecuteCommand(token, command) => {
-                //
-            }
+            Action::UpdateConfig(config) => try!(self.consensus_mut().handle_update_config(config)),
+            Action::ExecuteCommand(command) => try!(self.consensus_mut().handle_command(command)),
+            Action::Raft(raft) => try!(self.handle_raft_action(raft)),
         };
         self.action_queue.extend(actions);
         Ok(())
+    }
+    fn handle_commited(&mut self, version: Version) -> Result<Vec<Action<M>>, S::Error> {
+        if self.commit_version.log_index >= version.log_index {
+            return Err(Error::CommitConfliction);
+        }
+
+        // TODO: state_version => applied_version
+        let last_applied = self.state_version.log_index;
+        self.storage.log_get(last_applied + 1,
+                             (version.log_index - last_applied) as usize);
+        self.commit_version = version;
+        self.io_wait = Some(Action::LogApply(Vec::new()));
+        Ok(Vec::new())
+    }
+    fn handle_raft_action(&mut self,
+                          action: RaftAction<M::Command, M::Snapshot>)
+                          -> Result<Vec<Action<M>>, S::Error> {
+        Ok(match action {
+            RaftAction::LogAppend(entries, next) => {
+                self.storage.log_append(&entries);
+                self.io_wait = Some(Action::Raft(*next));
+                Vec::new()
+            }
+            RaftAction::LogRollback(first_index, next) => {
+                self.storage.log_truncate(first_index);
+                self.io_wait = Some(Action::Raft(*next));
+                Vec::new()
+            }
+            RaftAction::LogCommited(version) => try!(self.handle_commited(version)),
+            RaftAction::SaveBallot(ballot, next) => {
+                self.storage.save_ballot(&ballot);
+                self.io_wait = Some(Action::Raft(*next));
+                Vec::new()
+            }
+            RaftAction::InstallSnapshot { metadata, snapshot } => {
+                let action = Action::InstallSnapshot(IsFsm::SnapshotSave(metadata, snapshot));
+                vec![action]
+            }
+            RaftAction::BroadcastMsg(message) => {
+                // TODO: optimize
+                let ns: Vec<_> = self.consensus().members().into_iter().cloned().collect();
+                for n in ns {
+                    self.rpc.send(&n, &message);
+                }
+                Vec::new()
+            }
+            RaftAction::UnicastMsg(dest, message) => {
+                self.rpc.send(&dest, &message);
+                Vec::new()
+            }
+            RaftAction::UnicastLog(dest, header, commit, start, length) => {
+                // TODO: if dropped , then send snapshot
+                self.storage.log_get(start, length);
+                self.io_wait = Some(Action::AppendEntriesCall(dest, header, commit));
+                Vec::new()
+            }
+            RaftAction::Postpone(message) => {
+                self.action_queue.push_front(Action::Recv(message));
+                Vec::new()
+            }
+            RaftAction::ResetTimeout(kind) => {
+                // TODO:
+                self.timer.clear();
+                self.timer.set(::std::time::Duration::from_millis(100));
+                Vec::new()
+            }
+            RaftAction::Panic(error) => return Err(Error::Consensus(error)),
+        })
     }
 }
 
@@ -258,33 +393,54 @@ pub enum Action<M>
 {
     Timeout,
     Recv(Message<M::Command>),
-    Storage(Token, io::StorageData<M>),
-    InstallSnapshot(Token, IsFsm<io::SnapshotMetadata, M::Snapshot>),
-    Sync(Token),
-    UpdateConfig(Token, config::Config),
-    ExecuteCommand(Token, M::Command),
+    InstallSnapshot(IsFsm<io::SnapshotMetadata, M::Snapshot>),
+    Sync(u64),
+    UpdateConfig(config::Config),
+    ExecuteCommand(M::Command),
+    Raft(RaftAction<M::Command, M::Snapshot>),
+    LogApply(Vec<io::LogEntry<M::Command>>),
+    AppendEntriesCall(NodeId, MessageHeader, LogIndex),
+}
+
+pub enum RaftAction<T, S> {
+    LogAppend(Vec<io::LogEntry<T>>, Box<RaftAction<T, S>>),
+    LogRollback(LogIndex, Box<RaftAction<T, S>>),
+    LogCommited(Version),
+    SaveBallot(Ballot, Box<RaftAction<T, S>>),
+    InstallSnapshot {
+        metadata: io::SnapshotMetadata,
+        snapshot: S,
+    },
+    BroadcastMsg(Message<T>),
+    UnicastMsg(NodeId, Message<T>),
+
+    // TODO: 範囲外なら勝手にスナップショットモードに切り替わる
+    UnicastLog(NodeId, MessageHeader, LogIndex, LogIndex, usize),
+    Postpone(Message<T>),
+    ResetTimeout(TimeoutKind),
+    Panic(raft::Error),
+}
+pub enum TimeoutKind {
+    Min,
+    Max,
+    Random,
+}
+
+pub enum ErrorEvent {
+    NotLeader(Option<NodeId>),
 }
 
 pub enum Event {
-    Done(Token),
-    Aborted(Token),
-    NotLeader(Option<NodeId>),
-    ConfigChanged(config::Config),
-    RoleChanged(NodeRole),
-}
-
-pub struct TokenGenerator {
-    value: u64,
-}
-impl TokenGenerator {
-    pub fn new() -> Self {
-        TokenGenerator { value: 0 }
-    }
-    pub fn next(&mut self) -> Token {
-        let v = self.value;
-        self.value += 1;
-        Token(v)
-    }
+    Commited(LogIndex),
+    Aborted(LogIndex, ErrorEvent),
+    Synced(u64),
+    CannotSynced(u64, ErrorEvent),
+    SnapshotOk,
+    SnapshotFailed(ErrorEvent),
+    ConfigChanged {
+        stable: bool,
+        config: config::Config,
+    },
 }
 
 pub struct Timer;
@@ -296,6 +452,9 @@ impl Timer {
         panic!()
     }
     pub fn clear(&mut self) {
+        panic!()
+    }
+    pub fn set(&mut self, duration: ::std::time::Duration) {
         panic!()
     }
 }
