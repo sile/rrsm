@@ -11,3 +11,4 @@ keywords = ["raft", "distributed", "consensus"]
 license = "MIT"
 
 [dependencies]
+rand = "0.3"

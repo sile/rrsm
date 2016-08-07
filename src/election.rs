@@ -22,4 +22,10 @@ impl Ballot {
             voted_for: None,
         }
     }
+    pub fn increment_term(&mut self) {
+        self.term = self.term.checked_add(1).unwrap();
+    }
+    pub fn vote(&mut self, node: NodeId) {
+        self.voted_for = Some(node);
+    }
 }

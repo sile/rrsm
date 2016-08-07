@@ -1,10 +1,12 @@
+extern crate rand;
+
 pub mod election;
 pub mod log;
 pub mod io;
 pub mod config;
 pub mod consensus;
 mod state_machine;
-mod replicator;
+pub mod replicator;
 
 pub use state_machine::Machine;
 pub use replicator::Replicator;
@@ -18,8 +20,16 @@ pub struct AsyncResult<T, E> {
     pub result: Result<T, E>,
 }
 
-#[derive(Clone)]
+#[derive(Clone,Debug)]
 pub struct Node {
     pub id: NodeId,
     pub check_digit: CheckDigit,
+}
+impl Node {
+    pub fn new(id: &NodeId) -> Self {
+        Node {
+            id: id.clone(),
+            check_digit: rand::random(),
+        }
+    }
 }

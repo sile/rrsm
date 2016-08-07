@@ -5,25 +5,15 @@ use io::Postbox;
 use io::Timer;
 use super::*;
 
+// TODO: Debug
 pub enum Error<M, IO>
     where M: Machine,
           IO: io::IoModule<M>
 {
     NotClusterMember,
+    CommitConflict,
     Storage(<IO::Storage as Storage<M>>::Error),
-    Consensus(consensus::Error),
 }
-impl<M, IO> From<consensus::Error> for Error<M, IO>
-    where M: Machine,
-          IO: io::IoModule<M>
-{
-    fn from(f: consensus::Error) -> Self {
-        Error::Consensus(f)
-    }
-}
-
-// TODO: エイリアスを定義しない方が良いかも
-pub type Result<T, M, IO> = ::std::result::Result<T, Error<M, IO>>;
 
 pub struct Replicator<M, IO>
     where M: Machine
@@ -32,21 +22,24 @@ pub struct Replicator<M, IO>
     io: IO,
     last_applied: log::EntryVersion,
     last_commited: log::EntryVersion,
-    consensus: consensus::ConsensusModule,
+    consensus: consensus::ConsensusModule<M>,
     event_queue: VecDeque<Event>,
     action_queue: VecDeque<Action<M>>,
     syncings: VecDeque<(consensus::Timestamp, AsyncKey)>,
     commitings: VecDeque<(log::Index, AsyncKey)>,
     applicables: VecDeque<(Option<AsyncKey>, log::Entry<M::Command>)>,
     snapshotting: bool,
-    io_waits: HashMap<AsyncKey, Action<M>>,
+    io_waits: HashMap<AsyncKey, Reaction>,
     next_key: AsyncKey,
 }
 impl<M, IO> Replicator<M, IO>
-    where M: Machine,
+    where M: Machine + 'static,
           IO: io::IoModule<M>
 {
-    pub fn new(node_id: &NodeId, mut io: IO, config: config::Builder) -> Result<Self, M, IO> {
+    pub fn new(node_id: &NodeId,
+               mut io: IO,
+               config: config::Builder)
+               -> Result<Self, Error<M, IO>> {
         let config = config.build();
         if !config.is_member(node_id) {
             return Err(Error::NotClusterMember);
@@ -67,17 +60,17 @@ impl<M, IO> Replicator<M, IO>
         let consensus = consensus::ConsensusModule::new(node_id, &ballot, &config, log_index_table);
         Ok(Self::new_impl(machine, io, consensus, initial_version))
     }
-    pub fn load(node_id: &NodeId, mut io: IO) -> Result<Option<Self>, M, IO> {
+    pub fn load(node_id: &NodeId, mut io: IO) -> Result<Option<Self>, Error<M, IO>> {
         try!(io.storage_mut().flush().map_err(Error::Storage));
 
-        io.storage_mut().load_ballot();
+        io.storage_mut().load_ballot(0);
         let ballot = match try!(io.storage_mut().run_once().result.map_err(Error::Storage)) {
             io::StorageData::Ballot(x) => x,
             io::StorageData::None => return Ok(None),
             _ => unreachable!(),
         };
 
-        io.storage_mut().load_snapshot();
+        io.storage_mut().load_snapshot(0);
         let snapshot = match try!(io.storage_mut().run_once().result.map_err(Error::Storage)) {
             io::StorageData::Snapshot(x) => x,
             io::StorageData::None => return Ok(None),
@@ -92,7 +85,10 @@ impl<M, IO> Replicator<M, IO>
         let machine = snapshot.state.into();
         Ok(Some(Self::new_impl(machine, io, consensus, snapshot.last_included)))
     }
-    pub fn try_run_once(&mut self) -> Result<Option<Event>, M, IO> {
+    pub fn io_module(&mut self) -> &mut IO {
+        &mut self.io
+    }
+    pub fn try_run_once(&mut self) -> Result<Option<Event>, Error<M, IO>> {
         if let Some(event) = self.event_queue.pop_front() {
             return Ok(Some(event));
         }
@@ -133,15 +129,9 @@ impl<M, IO> Replicator<M, IO>
             None
         } else {
             let key = self.next_key();
-            self.snapshotting = true;
             let snapshot =
                 Snapshot::new(self.consensus.config(), &self.last_applied, &self.machine);
-            self.io.storage_mut().save_snapshot(snapshot, key);
-            self.io_waits.insert(key,
-                                 Action::HandleSnapshotSaved {
-                                     key: key,
-                                     last_included: self.last_applied.clone(),
-                                 });
+            self.install_snapshot(None, snapshot, Some(key));
             Some(key)
         }
     }
@@ -153,7 +143,11 @@ impl<M, IO> Replicator<M, IO>
             match entry.data {
                 log::Data::Noop => {}
                 log::Data::Config(config) => {
+                    let is_member = config.is_member(&self.consensus.node().id);
                     self.event_queue.push_back(Event::ConfigChanged(config));
+                    if !is_member {
+                        self.event_queue.push_back(Event::Purged);
+                    }
                 }
                 log::Data::Command(command) => {
                     self.machine.execute(command);
@@ -173,7 +167,8 @@ impl<M, IO> Replicator<M, IO>
     }
     fn check_timer(&mut self) {
         if self.io.timer_ref().is_elapsed() {
-            self.action_queue.push_front(Action::HandleTimeout); // high priority
+            println!("{}: elapsed", self.consensus.node().id);
+            self.action_queue.push_back(Action::HandleTimeout);
             self.io.timer_mut().clear();
         }
     }
@@ -182,36 +177,105 @@ impl<M, IO> Replicator<M, IO>
             self.action_queue.push_back(Action::HandleMessage(message));
         }
     }
-    fn check_storage(&mut self) -> Result<(), M, IO> {
-        panic!()
+    fn check_storage(&mut self) -> Result<(), Error<M, IO>> {
+        if let Some(async) = self.io.storage_mut().try_run_once() {
+            let key = async.key;
+            let data = try!(async.result.map_err(Error::Storage));
+            let reaction = self.io_waits.remove(&key).unwrap();
+            match data {
+                io::StorageData::Ballot(_) => unreachable!(),
+                io::StorageData::Entries(entries) => {
+                    match reaction {
+                        Reaction::ApplyEntries => {
+                            let mut index = self.last_applied.index + 1;
+                            for e in entries {
+                                let key =
+                                    if self.commitings.front().map_or(false, |x| x.0 == index) {
+                                        self.commitings.pop_front().take().map(|x| x.1)
+                                    } else {
+                                        None
+                                    };
+                                self.applicables.push_back((key, e));
+                                index += 1;
+                            }
+                        }
+                        Reaction::SendAppendEntries(node, header) => {
+                            let message =
+                                consensus::Message::make_append_entries_call(header,
+                                                                             entries,
+                                                                             self.last_commited
+                                                                                 .index);
+                            self.io.postbox_mut().send_val(&node, message);
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                io::StorageData::Snapshot(snapshot) => {
+                    match reaction {
+                        Reaction::SendSnapshot(node, header) => {
+                            let message = consensus::Message::make_install_snapshot_call(header,
+                                                                                         snapshot);
+                            self.io.postbox_mut().send_val(&node, message);
+                        }
+                        Reaction::LoadSnapshot(key) => {
+                            self.last_applied = snapshot.last_included.clone();
+                            self.last_commited = snapshot.last_included.clone();
+                            self.machine = snapshot.state.into();
+                            if let Some(key) = key {
+                                self.event_queue.push_back(Event::SnapshotInstalled(key));
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                io::StorageData::None => {
+                    match reaction {
+                        Reaction::HandleSnapshotSaved { key, node_id, config, last_included } => {
+                            let actions = self.consensus
+                                .handle_snapshot_installed(node_id, config, &last_included);
+                            self.action_queue.extend(actions.into_iter().map(Action::Consensus));
+
+                            let drop_key = self.next_key();
+                            self.io.storage_mut().log_drop_until(last_included.index + 1, drop_key);
+                            self.io_waits.insert(drop_key, Reaction::Noop);
+                            self.snapshotting = false;
+                            if last_included.index > self.last_applied.index {
+                                let snapshot_key = self.next_key();
+                                self.io.storage_mut().load_snapshot(snapshot_key);
+                                self.io_waits.insert(snapshot_key, Reaction::LoadSnapshot(key));
+                                self.action_queue.push_front(Action::Wait(snapshot_key));
+                            } else {
+                                if let Some(key) = key {
+                                    self.event_queue.push_back(Event::SnapshotInstalled(key));
+                                }
+                            }
+                        }
+                        Reaction::Noop => {}
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
+        Ok(())
     }
-    fn handle_action(&mut self, action: Action<M>) -> Result<(), M, IO> {
+    fn handle_action(&mut self, action: Action<M>) -> Result<(), Error<M, IO>> {
         match action {
-            Action::Noop => {}
             Action::Wait(key) => {
                 if self.io_waits.contains_key(&key) {
                     self.action_queue.push_front(Action::Wait(key));
                 }
             }
             Action::HandleTimeout => {
-                let actions = try!(self.consensus.handle_timeout());
+                let actions = self.consensus.handle_timeout();
                 self.action_queue.extend(actions.into_iter().map(Action::Consensus));
             }
             Action::HandleMessage(message) => {
-                let actions = try!(self.consensus.handle_message(message));
+                let actions = self.consensus.handle_message(message);
                 self.action_queue.extend(actions.into_iter().map(Action::Consensus));
             }
-            Action::HandleSnapshotSaved { key, last_included } => {
-                let drop_key = self.next_key();
-                try!(self.consensus.handle_snapshot_installed(&last_included));
-                self.io.storage_mut().log_drop_until(last_included.index + 1, drop_key);
-                self.io_waits.insert(drop_key, Action::Noop);
-                self.snapshotting = false;
-                self.event_queue.push_back(Event::SnapshotInstalled(key));
-            }
             Action::Execute(key, command) => {
-                if let Some(actions) = try!(self.consensus.propose(command)) {
-                    let index = self.io.storage_ref().last_appended().index + 1;
+                if let Some(actions) = self.consensus.propose(command) {
+                    let index = self.io.storage_ref().last_appended().index;
                     self.commitings.push_back((index, key));
                     self.action_queue.extend(actions.into_iter().map(Action::Consensus));
                 } else {
@@ -220,7 +284,7 @@ impl<M, IO> Replicator<M, IO>
                 }
             }
             Action::UpdateConfig(key, config) => {
-                if let Some(actions) = try!(self.consensus.update_config(config)) {
+                if let Some(actions) = self.consensus.update_config(config) {
                     let index = self.io.storage_ref().last_appended().index + 1;
                     self.commitings.push_back((index, key));
                     self.action_queue.extend(actions.into_iter().map(Action::Consensus));
@@ -234,7 +298,7 @@ impl<M, IO> Replicator<M, IO>
                     // NOTE: Already synced
                     return Ok(());
                 }
-                let actions = try!(self.consensus.sync());
+                let actions = self.consensus.sync();
                 self.action_queue.extend(actions.into_iter().map(Action::Consensus));
             }
             Action::Consensus(action) => {
@@ -243,52 +307,114 @@ impl<M, IO> Replicator<M, IO>
         }
         Ok(())
     }
-    fn handle_consensus_action(&mut self, action: consensus::Action<M>) -> Result<(), M, IO> {
+    fn install_snapshot(&mut self,
+                        node_id: Option<NodeId>,
+                        snapshot: Snapshot<M>,
+                        event_key: Option<AsyncKey>)
+                        -> bool {
+        if self.snapshotting {
+            false
+        } else {
+            let key = self.next_key();
+            let last_included = snapshot.last_included.clone();
+            let config = snapshot.config.clone();
+            self.snapshotting = true;
+            self.io.storage_mut().save_snapshot(snapshot, key);
+            self.io_waits.insert(key,
+                                 Reaction::HandleSnapshotSaved {
+                                     key: event_key,
+                                     node_id: node_id,
+                                     config: config,
+                                     last_included: last_included,
+                                 });
+            true
+        }
+    }
+    fn handle_consensus_action(&mut self,
+                               action: consensus::Action<M>)
+                               -> Result<(), Error<M, IO>> {
         use consensus as C;
         match action {
             C::Action::ResetTimeout(kind) => {
                 let after = self.io.timer_ref().calc_after(kind, self.consensus.config());
-                self.io.timer_mut().reset(&after);
+                self.io.timer_mut().reset(after);
             }
             C::Action::Postpone(message) => {
                 self.action_queue.push_front(Action::HandleMessage(message));
             }
-            C::Action::BroadcastMsg(_) => panic!(),
-            C::Action::UnicastMsg(_, _) => panic!(),
-            C::Action::UnicastLog { .. } => panic!(),
-            C::Action::InstallSnapshot(_) => panic!(),
+            C::Action::BroadcastMsg(message) => {
+                for node in self.consensus.config().all_members() {
+                    if *node != self.consensus.node().id {
+                        self.io.postbox_mut().send_ref(&node.clone(), &message);
+                    }
+                }
+            }
+            C::Action::UnicastMsg(node, message) => {
+                self.io.postbox_mut().send_val(&node, message);
+            }
+            C::Action::UnicastLog { destination, header, first_index, max_len } => {
+                // TODO: snapshotかどうかの判定はconsensusに任せるかも
+                let key = self.next_key();
+                if first_index < self.io.storage_ref().least_stored().index {
+                    self.io.storage_mut().load_snapshot(key);
+                    self.io_waits.insert(key, Reaction::SendSnapshot(destination, header));
+                } else {
+                    self.io.storage_mut().log_get(first_index, max_len, key);
+                    self.io_waits.insert(key, Reaction::SendAppendEntries(destination, header));
+                }
+            }
+            C::Action::InstallSnapshot(node_id, snapshot) => {
+                self.install_snapshot(Some(node_id), snapshot, None);
+            }
             C::Action::SaveBallot(ballot) => {
                 let key = self.next_key();
                 self.io.storage_mut().save_ballot(ballot, key);
-                self.io_waits.insert(key, Action::Noop);
+                self.io_waits.insert(key, Reaction::Noop);
                 self.action_queue.push_front(Action::Wait(key));
             }
             C::Action::LogAppend(entries) => {
                 let key = self.next_key();
                 self.io.storage_mut().log_append(entries, key);
-                self.io_waits.insert(key, Action::Noop);
+                self.io_waits.insert(key, Reaction::Noop);
                 self.action_queue.push_front(Action::Wait(key));
             }
             C::Action::LogRollback(next_index) => {
-                // TODO: handle commiging
-                // TODO: handle conflict (rollbacks of commited entries)
+                if self.last_commited.index <= next_index {
+                    // TODO: エラーが発生したら
+                    // 以降は継続不可にする
+                    return Err(Error::CommitConflict);
+                }
                 let key = self.next_key();
                 self.io.storage_mut().log_truncate(next_index, key);
-                self.io_waits.insert(key, Action::Noop);
+                self.io_waits.insert(key, Reaction::Noop);
                 self.action_queue.push_front(Action::Wait(key));
+                while !self.commitings.is_empty() {
+                    let &(index, key) = self.commitings.back().unwrap();
+                    if index >= next_index {
+                        self.event_queue.push_back(Event::Aborted(key, AbortReason::Rollbacked));
+                        self.commitings.pop_back();
+                    } else {
+                        break;
+                    }
+                }
             }
             C::Action::LogApply(last_commited) => {
+                let key = self.next_key();
+                let max_len = (last_commited.index - self.last_applied.index) as usize;
                 self.last_commited = last_commited;
-                // TODO: handle commiging
+                self.io.storage_mut().log_get(self.last_applied.index + 1, max_len, key);
+                self.io_waits.insert(key, Reaction::ApplyEntries);
+                self.action_queue.push_front(Action::Wait(key));
             }
         }
         Ok(())
     }
     fn new_impl(machine: M,
                 io: IO,
-                consensus: consensus::ConsensusModule,
+                mut consensus: consensus::ConsensusModule<M>,
                 last_commited: log::EntryVersion)
                 -> Self {
+        let actions = consensus.init();
         Replicator {
             machine: machine,
             io: io,
@@ -296,7 +422,7 @@ impl<M, IO> Replicator<M, IO>
             last_applied: last_commited.clone(),
             last_commited: last_commited,
             event_queue: VecDeque::new(),
-            action_queue: VecDeque::new(),
+            action_queue: actions.into_iter().map(Action::Consensus).collect(),
             syncings: VecDeque::new(),
             commitings: VecDeque::new(),
             applicables: VecDeque::new(),
@@ -315,7 +441,6 @@ impl<M, IO> Replicator<M, IO>
 pub enum Action<M>
     where M: Machine
 {
-    Noop,
     Wait(AsyncKey),
     HandleTimeout,
     HandleMessage(consensus::Message<M>),
@@ -323,21 +448,36 @@ pub enum Action<M>
     UpdateConfig(AsyncKey, config::Config),
     Sync(consensus::Timestamp),
     Consensus(consensus::Action<M>),
-    HandleSnapshotSaved {
-        key: AsyncKey,
-        last_included: log::EntryVersion,
-    },
 }
 
+pub enum Reaction {
+    Noop,
+    HandleSnapshotSaved {
+        key: Option<AsyncKey>,
+        node_id: Option<NodeId>,
+        config: config::Config,
+        last_included: log::EntryVersion,
+    },
+    ApplyEntries,
+    SendSnapshot(NodeId, consensus::MessageHeader),
+    SendAppendEntries(NodeId, consensus::MessageHeader),
+    LoadSnapshot(Option<AsyncKey>),
+}
+
+#[derive(Debug)]
 pub enum Event {
     Commited(AsyncKey),
     Aborted(AsyncKey, AbortReason),
     Synced(AsyncKey),
     SnapshotInstalled(AsyncKey),
     ConfigChanged(config::Config),
+    Purged,
 }
+
+#[derive(Debug)]
 pub enum AbortReason {
     NotLeader(Option<NodeId>),
+    Rollbacked,
 }
 
 pub struct Snapshot<M>
@@ -355,6 +495,18 @@ impl<M> Snapshot<M>
             last_included: last_included.clone(),
             config: config.clone(),
             state: machine.take_snapshot(),
+        }
+    }
+}
+impl<M> Clone for Snapshot<M>
+    where M: Machine,
+          M::Snapshot: Clone
+{
+    fn clone(&self) -> Self {
+        Snapshot {
+            last_included: self.last_included.clone(),
+            config: self.config.clone(),
+            state: self.state.clone(),
         }
     }
 }
