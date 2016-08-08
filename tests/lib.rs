@@ -226,6 +226,14 @@ impl rrsm::Machine for Calculator {
     }
 }
 
+struct CalculatorRsm;
+impl rrsm::Rsm for CalculatorRsm {
+    type Machine = Calculator;
+    type Storage = OnMemoryStorage<Self::Machine>;
+    type Postbox = OnMemoryPostbox<Self::Machine>;
+    type Timer = rrsm::io::DefaultTimer;
+}
+
 #[derive(Clone)]
 enum Op {
     Add(i64),
@@ -242,11 +250,11 @@ fn it_works() {
     for i in 0..10 {
         a.try_run_once().ok().unwrap().map(|e| println!("{}: a: {:?}", i, e));
     }
-    a.io_module().timer.reset(std::time::Duration::from_millis(0));
+    a.timer_mut().reset(std::time::Duration::from_millis(0));
     for i in 0..10 {
         a.try_run_once().ok().unwrap().map(|e| println!("{}: a: {:?}", i, e));
     }
-    a.io_module().timer.reset(std::time::Duration::from_millis(0));
+    a.timer_mut().reset(std::time::Duration::from_millis(0));
     for i in 0..30 {
         a.try_run_once().ok().unwrap().map(|e| println!("{}: a: {:?}", i, e));
         b.try_run_once().ok().unwrap().map(|e| println!("{}: b: {:?}", i, e));
@@ -275,15 +283,13 @@ fn it_works() {
 fn new_replicator(node: &str,
                   config: rrsm::config::Builder,
                   postoffice: &mut OnMemoryPostOffice<Calculator>)
-                  -> rrsm::Replicator<Calculator,
-                                      rrsm::io::DefaultIoModule<Calculator,
-                                                                OnMemoryPostbox<Calculator>,
-                                                                OnMemoryStorage<Calculator>,
-                                                                rrsm::io::DefaultTimer>> {
+                  -> rrsm::Replicator<CalculatorRsm> {
     let postbox = postoffice.create_postbox(&node.to_string());
     let storage = OnMemoryStorage::new();
     rrsm::Replicator::new(&node.to_string(),
-                          rrsm::io::module(postbox, storage),
+                          storage,
+                          postbox,
+                          rrsm::io::DefaultTimer::new(),
                           config)
         .ok()
         .unwrap()
