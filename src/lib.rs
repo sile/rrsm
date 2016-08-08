@@ -6,6 +6,7 @@ pub mod io;
 pub mod config;
 pub mod consensus;
 pub mod replicator;
+pub mod timer;
 
 pub trait Machine: Default {
     type Command;
