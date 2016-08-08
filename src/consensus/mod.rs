@@ -139,12 +139,11 @@ pub struct ConsensusModule<M>
 impl<M> ConsensusModule<M>
     where M: Machine + 'static
 {
-    pub fn new(node_id: &NodeId,
+    pub fn new(node: Node,
                ballot: &election::Ballot,
                config: &config::Config,
                table: log::IndexTable)
                -> Self {
-        let node = Node::new(node_id);
         let common = state::CommonState::new(node, ballot.clone(), config.clone(), table);
         ConsensusModule {
             common_state: common,

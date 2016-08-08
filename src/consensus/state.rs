@@ -15,7 +15,7 @@ pub struct CommonState {
     pub index_table: log::IndexTable,
     pub timestamp: super::Timestamp,
     pub last_acked_timestamp: super::Timestamp,
-    pub check_digits: HashMap<NodeId, CheckDigit>,
+    pub generations: HashMap<NodeId, NodeGeneration>,
     pub in_lease_priod: bool,
 }
 impl CommonState {
@@ -32,7 +32,7 @@ impl CommonState {
             // TODO: timestamp_acksもこの層で管理する
             timestamp: 0,
             last_acked_timestamp: 0,
-            check_digits: HashMap::new(),
+            generations: HashMap::new(),
             in_lease_priod: false,
         }
     }
@@ -65,10 +65,10 @@ impl CommonState {
                self.ballot.voted_for.as_ref() != Some(&from.id) {
                 return Ok((state, vec![]));
             }
-            if !self.check_digits.contains_key(&from.id) {
-                self.check_digits.insert(from.id.clone(), from.check_digit);
+            if !self.generations.contains_key(&from.id) {
+                self.generations.insert(from.id.clone(), from.generation);
             }
-            if *self.check_digits.get(&from.id).unwrap() != from.check_digit {
+            if *self.generations.get(&from.id).unwrap() != from.generation {
                 // The peer have been restarted
                 state.clear_node_state(self, &from.id);
             }

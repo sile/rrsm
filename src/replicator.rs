@@ -37,14 +37,14 @@ impl<R> Replicator<R>
     where R: Rsm,
           R::Machine: 'static
 {
-    pub fn new(node_id: &NodeId,
+    pub fn new(node: Node,
                mut storage: R::Storage,
                postbox: R::Postbox,
                timer: R::Timer, // TODO: default
                config: config::Builder)
                -> Result<Self, Error<R>> {
         let config = config.build();
-        if !config.is_member(node_id) {
+        if !config.is_member(&node.id) {
             return Err(Error::NotClusterMember);
         }
 
@@ -60,7 +60,7 @@ impl<R> Replicator<R>
         try!(storage.flush().map_err(Error::Storage));
 
         let log_index_table = storage.build_log_index_table();
-        let consensus = consensus::ConsensusModule::new(node_id, &ballot, &config, log_index_table);
+        let consensus = consensus::ConsensusModule::new(node, &ballot, &config, log_index_table);
         Ok(Self::new_impl(machine, storage, postbox, timer, consensus, initial_version))
     }
     // TODO:

@@ -286,7 +286,7 @@ fn new_replicator(node: &str,
                   -> rrsm::Replicator<CalculatorRsm> {
     let postbox = postoffice.create_postbox(&node.to_string());
     let storage = OnMemoryStorage::new();
-    rrsm::Replicator::new(&node.to_string(),
+    rrsm::Replicator::new(rrsm::Node::new(node.to_string(), 0),
                           storage,
                           postbox,
                           rrsm::io::DefaultTimer::new(),

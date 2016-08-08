@@ -19,7 +19,6 @@ pub trait Rsm {
     type Storage: io::Storage<Self::Machine>;
     type Postbox: io::Postbox<Self::Machine>;
     type Timer: io::Timer;
-    // TODO: type Clock;
 }
 
 
@@ -27,7 +26,8 @@ pub trait Rsm {
 pub use replicator::Replicator;
 
 pub type NodeId = String;
-pub type CheckDigit = u64;
+pub type NodeGeneration = u64;
+
 pub type AsyncKey = u64;
 
 pub struct AsyncResult<T, E> {
@@ -38,13 +38,13 @@ pub struct AsyncResult<T, E> {
 #[derive(Clone,Debug)]
 pub struct Node {
     pub id: NodeId,
-    pub check_digit: CheckDigit,
+    pub generation: NodeGeneration,
 }
 impl Node {
-    pub fn new(id: &NodeId) -> Self {
+    pub fn new(id: NodeId, generation: NodeGeneration) -> Self {
         Node {
-            id: id.clone(),
-            check_digit: rand::random(),
+            id: id,
+            generation: generation,
         }
     }
 }
