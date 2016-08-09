@@ -1,4 +1,4 @@
-extern crate rand;
+use std::time;
 
 pub mod election;
 pub mod log;
@@ -6,9 +6,6 @@ pub mod io;
 pub mod config;
 pub mod consensus;
 pub mod replicator;
-pub mod timer;
-
-pub use timer::Timer;
 
 pub trait Machine: Default {
     type Command;
@@ -21,9 +18,14 @@ pub trait Rsm {
     type Machine: Machine;
     type Storage: io::Storage<Self::Machine>;
     type Postbox: io::Postbox<Self::Machine>;
-    type Timer: timer::Timer;
+    type Timer: Timer;
 }
 
+pub trait Timer: Default {
+    fn expires_between(&mut self, min_after: time::Duration, max_after: time::Duration);
+    fn is_expired(&self) -> bool;
+    fn clear(&mut self);
+}
 
 // TODO:
 pub use replicator::Replicator;
