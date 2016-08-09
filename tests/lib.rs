@@ -1,7 +1,8 @@
 extern crate rrsm;
 
+mod timer;
+
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::cell::RefCell;
@@ -231,7 +232,7 @@ impl rrsm::Rsm for CalculatorRsm {
     type Machine = Calculator;
     type Storage = OnMemoryStorage<Self::Machine>;
     type Postbox = OnMemoryPostbox<Self::Machine>;
-    type Timer = rrsm::io::DefaultTimer;
+    type Timer = timer::ManualTimer;
 }
 
 #[derive(Clone)]
@@ -240,21 +241,21 @@ enum Op {
     Sub(i64),
 }
 
-use rrsm::io::Timer;
 #[test]
 fn it_works() {
+    let mut clock = timer::ManualClock::new();
     let mut postoffice = OnMemoryPostOffice::new();
-    let mut a = new_replicator("a", config(), &mut postoffice);
-    let mut b = new_replicator("b", config(), &mut postoffice);
-    let mut c = new_replicator("c", config(), &mut postoffice);
+    let mut a = new_replicator("a", config(), &mut clock, &mut postoffice);
+    let mut b = new_replicator("b", config(), &mut clock, &mut postoffice);
+    let mut c = new_replicator("c", config(), &mut clock, &mut postoffice);
     for i in 0..10 {
         a.try_run_once().ok().unwrap().map(|e| println!("{}: a: {:?}", i, e));
     }
-    a.timer_mut().reset(std::time::Duration::from_millis(0));
+    clock.elapse_ms(10000);
     for i in 0..10 {
         a.try_run_once().ok().unwrap().map(|e| println!("{}: a: {:?}", i, e));
     }
-    a.timer_mut().reset(std::time::Duration::from_millis(0));
+    clock.elapse_ms(10000);
     for i in 0..30 {
         a.try_run_once().ok().unwrap().map(|e| println!("{}: a: {:?}", i, e));
         b.try_run_once().ok().unwrap().map(|e| println!("{}: b: {:?}", i, e));
@@ -282,6 +283,7 @@ fn it_works() {
 }
 fn new_replicator(node: &str,
                   config: rrsm::config::Builder,
+                  clock: &mut timer::ManualClock,
                   postoffice: &mut OnMemoryPostOffice<Calculator>)
                   -> rrsm::Replicator<CalculatorRsm> {
     let postbox = postoffice.create_postbox(&node.to_string());
@@ -289,7 +291,7 @@ fn new_replicator(node: &str,
     rrsm::Replicator::new(rrsm::Node::new(node.to_string(), 0),
                           storage,
                           postbox,
-                          rrsm::io::DefaultTimer::new(),
+                          clock.make_timer(),
                           config)
         .ok()
         .unwrap()

@@ -9,3 +9,6 @@ repository = "https://github.com/sile/rrsm"
 readme = "README.md"
 keywords = ["raft", "distributed", "consensus"]
 license = "MIT"
+
+[dev-dependencies]
+rand = "0.3"
