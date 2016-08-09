@@ -52,6 +52,34 @@ impl CommonState {
         header.timestamp = from.timestamp;
         header
     }
+    pub fn min_timeout<M>(&self) -> Action<M>
+        where M: Machine
+    {
+        Action::ResetTimeout {
+            min: self.config.min_election_timeout,
+            max: self.config.min_election_timeout,
+        }
+    }
+    pub fn mid_timeout<M>(&self) -> Action<M>
+        where M: Machine
+    {
+        let mut mid = self.config.max_election_timeout / 2;
+        if mid < self.config.min_election_timeout {
+            mid = self.config.min_election_timeout;
+        }
+        Action::ResetTimeout {
+            min: mid,
+            max: mid,
+        }
+    }
+    pub fn random_timeout<M>(&self) -> Action<M>
+        where M: Machine
+    {
+        Action::ResetTimeout {
+            min: self.config.min_election_timeout,
+            max: self.config.max_election_timeout,
+        }
+    }
     pub fn handle_message<M>
         (&mut self,
          message: Message<M>,
@@ -180,7 +208,7 @@ impl<M> FollowerState<M>
                                  entries: Vec<log::Entry<M::Command>>,
                                  leader_commit: log::Index)
                                  -> (Box<ConsensusState<M>>, Vec<Action<M>>) {
-        let mut actions = vec![Action::ResetTimeout(super::TimeoutKind::Mid)];
+        let mut actions = vec![common.mid_timeout()];
         common.in_lease_priod = true;
 
         self.leader_commit = cmp::max(self.leader_commit, leader_commit);
@@ -248,14 +276,14 @@ impl<M> ConsensusState<M> for FollowerState<M>
     fn init(self: Box<Self>, common: &mut CommonState) -> (Box<ConsensusState<M>>, Vec<Action<M>>) {
         // common.ballot.voted_for = None;
         common.in_lease_priod = true;
-        (self, vec![Action::ResetTimeout(super::TimeoutKind::Mid)])
+        (self, vec![common.mid_timeout()])
     }
     fn handle_timeout(self: Box<Self>,
                       common: &mut CommonState)
                       -> (Box<ConsensusState<M>>, Vec<Action<M>>) {
         if common.in_lease_priod {
             common.in_lease_priod = false;
-            (self, vec![Action::ResetTimeout(super::TimeoutKind::Mid)])
+            (self, vec![common.mid_timeout()])
         } else {
             Box::new(CandidateState::new()).init(common)
         }
@@ -332,7 +360,7 @@ impl<M> ConsensusState<M> for CandidateState<M>
             (state, actions)
         } else {
             let call = Message::make_request_vote_call(common.make_header());
-            actions.push(Action::ResetTimeout(super::TimeoutKind::Random));
+            actions.push(common.random_timeout());
             actions.push(Action::BroadcastMsg(call));
             (self, actions)
         }
@@ -541,8 +569,7 @@ impl<M> ConsensusState<M> for LeaderState<M>
         let entries = vec![log::Entry::noop(common.ballot.term)];
         common.index_table.extend(&entries);
 
-        let mut actions = vec![Action::ResetTimeout(super::TimeoutKind::Min),
-                               Action::LogAppend(entries)];
+        let mut actions = vec![common.min_timeout(), Action::LogAppend(entries)];
         actions.extend(self.make_append_entries(common));
         (self, actions)
     }
@@ -550,7 +577,7 @@ impl<M> ConsensusState<M> for LeaderState<M>
                       common: &mut CommonState)
                       -> (Box<ConsensusState<M>>, Vec<Action<M>>) {
         let mut actions = self.make_append_entries(common);
-        actions.push(Action::ResetTimeout(super::TimeoutKind::Min));
+        actions.push(common.min_timeout());
         (self, actions)
     }
     fn handle_message(self: Box<Self>,
@@ -581,15 +608,14 @@ impl<M> ConsensusState<M> for LeaderState<M>
             self.handle_update_config(common);
         }
 
-        let mut actions = vec![Action::ResetTimeout(super::TimeoutKind::Min),
-                               Action::LogAppend(entries)];
+        let mut actions = vec![common.min_timeout(), Action::LogAppend(entries)];
         actions.extend(self.make_append_entries(common));
         (self, Some(actions))
     }
     fn sync(mut self: Box<Self>,
             common: &mut CommonState)
             -> (Box<ConsensusState<M>>, Vec<Action<M>>) {
-        let mut actions = vec![Action::ResetTimeout(super::TimeoutKind::Min)];
+        let mut actions = vec![common.min_timeout()];
         actions.extend(self.make_append_entries(common));
         (self, actions)
     }

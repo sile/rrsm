@@ -8,6 +8,8 @@ pub mod consensus;
 pub mod replicator;
 pub mod timer;
 
+pub use timer::Timer;
+
 pub trait Machine: Default {
     type Command;
     type Snapshot: Into<Self>;
@@ -19,7 +21,7 @@ pub trait Rsm {
     type Machine: Machine;
     type Storage: io::Storage<Self::Machine>;
     type Postbox: io::Postbox<Self::Machine>;
-    type Timer: io::Timer;
+    type Timer: timer::Timer;
 }
 
 

@@ -1,4 +1,3 @@
-use rand;
 use AsyncKey;
 use AsyncResult;
 use NodeId;
@@ -7,7 +6,6 @@ use log;
 use election;
 use consensus;
 use replicator;
-use config;
 
 // non-byzantine unreliable communication channel
 pub trait Postbox<M>
@@ -49,53 +47,4 @@ pub enum StorageData<M>
     Ballot(election::Ballot),
     Snapshot(replicator::Snapshot<M>),
     None,
-}
-
-use std::time;
-pub trait Timer {
-    fn is_elapsed(&self) -> bool;
-    fn clear(&mut self);
-    fn reset(&mut self, after: time::Duration);
-    fn calc_after(&self, consensus::TimeoutKind, &config::Config) -> time::Duration;
-}
-
-pub struct DefaultTimer {
-    duration: Option<time::Duration>,
-    start_time: time::Instant,
-}
-impl DefaultTimer {
-    pub fn new() -> Self {
-        DefaultTimer {
-            duration: None,
-            start_time: time::Instant::now(),
-        }
-    }
-}
-impl Timer for DefaultTimer {
-    fn is_elapsed(&self) -> bool {
-        self.duration.as_ref().map_or(false, |d| *d <= self.start_time.elapsed())
-    }
-    fn clear(&mut self) {
-        self.duration = None;
-    }
-    fn reset(&mut self, after: time::Duration) {
-        self.start_time = time::Instant::now();
-        self.duration = Some(after);
-    }
-    fn calc_after(&self, kind: consensus::TimeoutKind, config: &config::Config) -> time::Duration {
-        match kind {
-            consensus::TimeoutKind::Min => config.min_election_timeout,
-            consensus::TimeoutKind::Max => config.max_election_timeout,
-            consensus::TimeoutKind::Mid => {
-                (config.max_election_timeout + config.min_election_timeout) / 2
-            }
-            consensus::TimeoutKind::Random => {
-                // XXX: maybe incorrect
-                let delta = config.max_election_timeout - config.min_election_timeout;
-                let max_nanos = (delta.as_secs() << 32) + delta.subsec_nanos() as u64;
-                let nanos = rand::random::<u64>() % max_nanos;
-                time::Duration::new(nanos >> 32, nanos as u32) + config.min_election_timeout
-            }
-        }
-    }
 }

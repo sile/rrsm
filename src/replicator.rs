@@ -2,7 +2,6 @@ use std::collections::VecDeque;
 use std::collections::HashMap;
 use io::Storage;
 use io::Postbox;
-use io::Timer;
 use super::*;
 
 // TODO: Debug
@@ -173,7 +172,7 @@ impl<R> Replicator<R>
         }
     }
     fn check_timer(&mut self) {
-        if self.timer.is_elapsed() {
+        if self.timer.is_expired() {
             println!("{}: elapsed", self.consensus.node().id);
             self.action_queue.push_back(Action::HandleTimeout);
             self.timer.clear();
@@ -342,9 +341,8 @@ impl<R> Replicator<R>
                                -> Result<(), Error<R>> {
         use consensus as C;
         match action {
-            C::Action::ResetTimeout(kind) => {
-                let after = self.timer.calc_after(kind, self.consensus.config());
-                self.timer.reset(after);
+            C::Action::ResetTimeout { min, max } => {
+                self.timer.expires_between(min, max);
             }
             C::Action::Postpone(message) => {
                 self.action_queue.push_front(Action::HandleMessage(message));

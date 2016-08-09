@@ -1,3 +1,4 @@
+use std::time;
 use super::*;
 
 mod state;
@@ -230,7 +231,10 @@ impl<M> ConsensusModule<M>
 pub enum Action<M>
     where M: Machine
 {
-    ResetTimeout(TimeoutKind),
+    ResetTimeout {
+        min: time::Duration,
+        max: time::Duration,
+    },
     Postpone(Message<M>),
     BroadcastMsg(Message<M>),
     UnicastMsg(NodeId, Message<M>),
@@ -247,6 +251,7 @@ pub enum Action<M>
     LogApply(log::EntryVersion),
 }
 
+// TODO: DELETE
 #[derive(Debug)]
 pub enum TimeoutKind {
     Min,
